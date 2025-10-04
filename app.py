@@ -1,20 +1,16 @@
-from flask import Flask, render_template, url_for, redirect
-from flask_login import login_user, LoginManager, login_required, logout_user
-from extensions import db, bcrypt
-from flask_login import current_user
+from flask import Flask, jsonify, request
+from flask_login import (
+    LoginManager, login_user, login_required,
+    logout_user, current_user
+)
 from sqlalchemy.orm import Session
-
+from extensions import db, bcrypt
 from entity.User import User
 from entity.Task import StatusEnum, Task
 from entity.Category import Category
 
-from forms.LoginForm import LoginForm
-from forms.RegisterForm import RegisterForm
-from forms.TaskForm import TaskForm
-from forms.CategoryForm import CategoryForm
-
 app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///database.db"
+app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///database.db"
 app.config["SECRET_KEY"] = "thisisasecretkey"
 
 login_manager = LoginManager()
@@ -24,199 +20,211 @@ login_manager.login_view = "login"
 db.init_app(app)
 bcrypt.init_app(app)
 
+
 @login_manager.user_loader
 def load_user(user_id):
     with Session(db.engine) as session:
         return session.get(User, int(user_id))
 
 
-# making the tables in the database
 with app.app_context():
-    try: 
+    try:
         db.create_all()
-        print("made the tables")
-    except Exception as e: 
-        print("Couldnt make the tables")
-        print(e)
+        print("Database tables created")
+    except Exception as e:
+        print("Could not create tables:", e)
 
 @app.route("/")
 def home():
-    if (current_user):
-        return redirect(url_for("dashboard"))
-    return render_template("home.html")
+    return jsonify({"message": "Welcome to the Task Manager API"})
+
+@app.route("/api/register", methods=["POST"])
+def register():
+    data = request.get_json()
+    if not data or "username" not in data or "password" not in data:
+        return jsonify({"error": "Missing username or password"}), 400
+
+    hashed_password = bcrypt.generate_password_hash(data["password"]).decode("utf8")
+    new_user = User(username=data["username"], password=hashed_password)
+
+    try:
+        db.session.add(new_user)
+        db.session.commit()
+        return jsonify({"message": "User registered successfully"}), 201
+    except Exception as e:
+        print("DB error:", e)
+        return jsonify({"error": "Failed to register user"}), 500
 
 
-@app.route("/login", methods=["GET", "POST"])
+@app.route("/api/login", methods=["POST"])
 def login():
-    form = LoginForm()
-    if (form.validate_on_submit()):
-        user = User.query.filter_by(username = form.username.data).first()
-        if (user):
-            if bcrypt.check_password_hash(user.password, form.password.data):
-                login_user(user)
-                return redirect(url_for("dashboard"))
-    return render_template("login.html", form = form)
+    data = request.get_json()
+    user = User.query.filter_by(username=data.get("username")).first()
+
+    if user and bcrypt.check_password_hash(user.password, data.get("password")):
+        login_user(user)
+        return jsonify({"message": "Login successful"})
+    return jsonify({"error": "Invalid credentials"}), 401
 
 
-@app.route("/dashboard", methods = ["GET", "POST"])
+@app.route("/api/logout", methods=["POST"])
 @login_required
-def dashboard(): 
-    tasks = Task.query.filter_by(user_id = current_user.id).all()
-    categories = Category.query.filter_by(user_id = current_user.id).all()
-
-    form = CategoryForm()
-    if (form.validate_on_submit()):
-        new_category = Category(
-            category_name=form.category_name.data,
-            user_id=current_user.id
-        )
-        try: 
-            db.session.add(new_category)
-            db.session.commit()
-            print("Added the category")
-        except Exception as e: 
-            print("Could not add the new category." )
-            print(e)
-    return render_template("dashboard.html", user = current_user, tasks = tasks, categories = categories, form=form)
+def logout():
+    logout_user()
+    return jsonify({"message": "Logged out successfully"})
 
 
-
-@app.route("/create-new-task", methods = ["GET", "POST"])
+@app.route("/api/tasks", methods=["POST"])
 @login_required
-def createNewTask(): 
-    form = TaskForm()
-    form.category.choices = [(c.id, c.category_name) for c in Category.query.filter_by(user_id=current_user.id).all()]
-    
-    if (form.validate_on_submit()):
-        new_task = Task(
-            title=form.title.data,
-            description=form.description.data,
-            due_date=form.due_date.data,
-            completed=False,
-            category_id=form.category.data, 
-            user_id=current_user.id,
-            status=StatusEnum.PENDING
-        )
-        try: 
-            db.session.add(new_task)
-            db.session.commit()
-            print("Added the task")
-        except Exception as e: 
-            print("Could not add the new task." )
-            print(e)
-        return redirect(url_for("dashboard"))
-    return render_template("createNewTask.html",
-                            form=form, 
-                            user = current_user,
-                            page_title="Create Task",
-                            submit_text="Create Task")
+def create_task():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Missing task data"}), 400
 
-@app.route("/add-category", methods=["POST"])
-@login_required
-def addCategory():
-    form = CategoryForm()
-    if form.validate_on_submit():
-        new_category = Category(
-            category_name=form.category_name.data,
-            user_id=current_user.id
-        )
-        try: 
-            db.session.add(new_category)
-            db.session.commit()
-        except Exception as e:
-            print("Could not add category:", e)
-    return redirect(url_for("dashboard"))
+    new_task = Task(
+        title=data.get("title"),
+        description=data.get("description"),
+        due_date=data.get("due_date"),
+        completed=False,
+        category_id=data.get("category_id"),
+        user_id=current_user.id,
+        status=StatusEnum.PENDING
+    )
 
-@app.route("/update-task/<int:task_id>", methods = ["GET", "POST"])
+    try:
+        db.session.add(new_task)
+        db.session.commit()
+        return jsonify({"message": "Task created successfully"}), 201
+    except Exception as e:
+        print("Error creating task:", e)
+        return jsonify({"error": "Could not create task"}), 500
+
+
+@app.route("/api/tasks/<int:task_id>", methods=["PUT"])
 @login_required
-def updateTask(task_id): 
-    print("TASK ID IS THIS - ", task_id)
+def update_task(task_id):
     task = Task.query.get_or_404(task_id)
 
-    # Make sure the current user owns this task
     if task.user_id != current_user.id:
-        return "Unauthorized", 403
+        return jsonify({"error": "Unauthorized"}), 403
 
-    form = TaskForm(obj=task)  # Populate form with existing task data
+    data = request.get_json()
+    task.title = data.get("title", task.title)
+    task.description = data.get("description", task.description)
+    task.due_date = data.get("due_date", task.due_date)
+    task.category_id = data.get("category_id", task.category_id)
+    task.status = StatusEnum[data.get("status", task.status.name)]
 
-    if form.validate_on_submit():
-        task.title = form.title.data
-        task.description = form.description.data
-        task.due_date = form.due_date.data
-        # completed field is not in form; keep existing value
-        try:
-            db.session.commit()
-            print("Updated the task")
-        except Exception as e:
-            print("Could not update the task")
-            print(e)
-        return redirect(url_for("dashboard"))
+    try:
+        db.session.commit()
+        return jsonify({"message": "Task updated successfully"})
+    except Exception as e:
+        print("Error updating task:", e)
+        return jsonify({"error": "Could not update task"}), 500
 
-    return render_template("createNewTask.html", 
-                            form=form, 
-                            user=current_user,        
-                            page_title="Update Task",
-                            submit_text="Update Task")
 
-@app.route("/delete-task/<int:task_id>", methods=["POST"])
+@app.route("/api/tasks/<int:task_id>", methods=["DELETE"])
 @login_required
-def deleteTask(task_id):
+def delete_task(task_id):
     task = Task.query.get_or_404(task_id)
 
-    # Make sure the current user owns this task
     if task.user_id != current_user.id:
-        return "Unauthorized", 403
+        return jsonify({"error": "Unauthorized"}), 403
 
     try:
         db.session.delete(task)
         db.session.commit()
-        print(f"Deleted task {task_id}")
+        return jsonify({"message": f"Task {task_id} deleted successfully"})
     except Exception as e:
-        print("Could not delete the task")
-        print(e)
+        print("Error deleting task:", e)
+        return jsonify({"error": "Could not delete task"}), 500
 
-    return redirect(url_for("dashboard"))
-
-@app.route("/delete-category/<int:category_id>", methods=["POST"])
+@app.route("/api/tasks", methods=["GET"])
 @login_required
-def deleteCategory(category_id):
+def get_tasks():
+    query = Task.query.filter_by(user_id=current_user.id)
+    status = request.args.get("status")
+    category_id = request.args.get("category_id")
+    due_date = request.args.get("due_date")
+
+    if status:
+        query = query.filter_by(status=status)
+    if category_id:
+        query = query.filter_by(category_id=category_id)
+    if due_date:
+        query = query.filter(Task.due_date == due_date)
+
+    tasks = query.all()
+    return jsonify([{
+        "id": t.id,
+        "title": t.title,
+        "description": t.description,
+        "due_date": t.due_date.isoformat() if t.due_date else None,
+        "status": t.status,
+        "category": t.category.category_name if t.category else None
+    } for t in tasks])
+
+
+@app.route("/api/tasks/<int:task_id>/complete", methods=["PATCH"])
+@login_required
+def complete_task(task_id):
+    task = Task.query.get_or_404(task_id)
+    if task.user_id != current_user.id:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    task.status = StatusEnum.COMPLETED
+    db.session.commit()
+    return jsonify({"message": "Task marked as completed"})
+
+
+
+@app.route("/api/categories", methods=["GET"])
+@login_required
+def get_categories():
+    categories = Category.query.filter_by(user_id=current_user.id).all()
+    return jsonify([
+        {"id": c.id, "name": c.category_name}
+        for c in categories
+    ])
+
+
+@app.route("/api/categories", methods=["POST"])
+@login_required
+def create_category():
+    data = request.get_json()
+    if not data or "category_name" not in data:
+        return jsonify({"error": "Missing category_name"}), 400
+
+    new_category = Category(
+        category_name=data["category_name"],
+        user_id=current_user.id
+    )
+
+    try:
+        db.session.add(new_category)
+        db.session.commit()
+        return jsonify({"message": "Category created successfully"}), 201
+    except Exception as e:
+        print("Error creating category:", e)
+        return jsonify({"error": "Could not create category"}), 500
+
+
+@app.route("/api/categories/<int:category_id>", methods=["DELETE"])
+@login_required
+def delete_category(category_id):
     category = Category.query.get_or_404(category_id)
     if category.user_id != current_user.id:
-        return "Unauthorized", 403
-
+        return jsonify({"error": "Unauthorized"}), 403
+    if (category is None):
+        return jsonify({"error": "Category not found"}), 404
     try:
         db.session.delete(category)
         db.session.commit()
+        return jsonify({"message": f"Category {category_id} deleted successfully"})
     except Exception as e:
-        print("Could not delete category:", e)
-    return redirect(url_for("dashboard"))
+        print("Error deleting category:", e)
+        return jsonify({"error": "Could not delete category"}), 500
 
 
-@app.route("/register", methods=["GET", "POST"])
-def register():
-    form = RegisterForm()
-    print("inside the register form part. before if statement and after form")
-    if (form.validate_on_submit()):
-        hashed_password = bcrypt.generate_password_hash(form.password.data).decode('utf8')
-        new_user = User(username=form.username.data, password=hashed_password)
-        try: 
-            db.session.add(new_user)
-            db.session.commit()
-            print("successfully added the new user to the database")
-            return redirect(url_for("login"))
-        except:
-            print("failed to add the data to the database.")
-    else : 
-        print("form is not valid")
-    return render_template("register.html", form = form)
-
-
-@app.route("/logout", methods=["GET", "POST"])
-@login_required
-def logout():
-    logout_user()
-    return redirect(url_for("login"))
-
-
-if (__name__ == "__main__"):
+if __name__ == "__main__":
     app.run(debug=True)
